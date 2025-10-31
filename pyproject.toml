@@ -1,0 +1,16 @@
+[project]
+name = "poe-currency-tracker"
+version = "0.1.0"
+description = "Curses-based Path of Exile currency tracker pulling data from the PoE Ninja API."
+authors = [
+  { name = "Codex Assistant" }
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+poe-currency-tracker = "poe_tracker.app:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
