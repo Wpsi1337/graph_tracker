@@ -4,7 +4,7 @@ import curses
 import re
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from .api import (
     ApiError,
@@ -17,6 +17,7 @@ from .api import (
 from .cache import DEFAULT_CACHE_TTL, SnapshotCache
 from .data import CurrencyEntry, CurrencySnapshot
 from .graph import render_graph_block
+from .settings import save_settings
 
 
 @dataclass
@@ -28,6 +29,7 @@ class TrackerConfig:
     refresh_interval: float = 120.0
     poe_ninja_cookie: Optional[str] = None
     price_mode: str = "stash"
+    settings: Optional[Dict[str, Any]] = None
 
 
 @dataclass(slots=True)
@@ -48,6 +50,13 @@ class TrackerUI:
         self.selected_index = 0
         self.last_refresh = 0.0
         self.should_exit = False
+        self._settings: Dict[str, Any] = dict(config.settings) if config.settings else {
+            "game": config.game,
+            "league": config.league,
+            "interval": config.refresh_interval,
+            "limit": config.limit,
+        }
+        self.config.settings = self._settings
         self.game = (self.config.game or "poe2").strip().lower()
         self._price_modes = ("stash", "exchange") if self.game == "poe" else ("stash",)
         self.price_mode = self._sanitize_price_mode(self.config.price_mode)
@@ -241,6 +250,9 @@ class TrackerUI:
                 self._clear_search()
                 return
         backtab_key = getattr(curses, "KEY_BTAB", None)
+        if key in (ord("o"), ord("O")):
+            self._show_options_menu(stdscr)
+            return
         if key == 9 or (backtab_key is not None and key == backtab_key):
             if self.game == "poe":
                 self._toggle_price_mode()
@@ -648,13 +660,16 @@ class TrackerUI:
         if header_y >= start_y + height:
             return
 
-        headers = ["Rank", "Currency", "Exalted", "Chaos", "Divine", "Volume/Hour"]
+        headers = ["#", "Item", "Exalted", "Chaos", "Divine", "Volume/Hour"]
         column_widths = self._calculate_column_widths(width, headers)
+        separator_x = start_x + column_widths[0]
         header_line = self._format_row(headers, column_widths)
         attributes = curses.A_BOLD
         if curses.has_colors():
             attributes |= curses.color_pair(1)
         self._addstr(stdscr, header_y, start_x, header_line[:width], attributes)
+        if start_x <= separator_x < start_x + width:
+            self._addstr(stdscr, header_y, separator_x, "│", attributes)
 
         data_start = header_y + 1
 
@@ -665,6 +680,13 @@ class TrackerUI:
             else:
                 message = "Waiting for data..." if not self.error_message else self.error_message
             self._draw_message_block(stdscr, data_start, start_x, width, height - (data_start - start_y), message)
+            if start_x <= separator_x < start_x + width:
+                self._draw_vertical_span(
+                    stdscr,
+                    separator_x,
+                    header_y + 1,
+                    min(start_y + height, stdscr.getmaxyx()[0]),
+                )
             return
 
         window_capacity = max(1, start_y + height - data_start)
@@ -677,6 +699,7 @@ class TrackerUI:
         self.scroll_offset = max(0, min(self.scroll_offset, max(0, total_entries - window_capacity)))
 
         visible_slice = entries[self.scroll_offset : self.scroll_offset + window_capacity]
+        last_row_index = header_y
         for offset, display in enumerate(visible_slice):
             row_index = data_start + offset
             if row_index >= start_y + height:
@@ -700,6 +723,13 @@ class TrackerUI:
                 else:
                     attributes |= curses.A_REVERSE
             self._addstr(stdscr, row_index, start_x, row_text[:width], attributes)
+            if start_x <= separator_x < start_x + width:
+                self._addstr(stdscr, row_index, separator_x, "│", attributes)
+            last_row_index = row_index
+
+        if start_x <= separator_x < start_x + width:
+            bottom_limit = min(start_y + height, stdscr.getmaxyx()[0])
+            self._draw_vertical_span(stdscr, separator_x, last_row_index + 1, bottom_limit)
 
     def _render_graph(
         self,
@@ -749,43 +779,71 @@ class TrackerUI:
             self._addstr(stdscr, start_y + 1 + idx, start_x, line[:width])
 
     def _render_status(self, stdscr: "curses._CursesWindow", y: int, width: int) -> None:
-        if y < 0:
+        max_y, _ = stdscr.getmaxyx()
+        if y < 0 or y >= max_y:
             return
+
+        lines: list[str] = []
+        error_line_index = None
+
         if self.snapshot or self.search_query:
             last_update = time.strftime("%H:%M:%S", time.localtime(self.snapshot.fetched_at)) if self.snapshot else "--:--:--"
-            controls = "q=quit r=refresh ↑/↓=rows PgUp/PgDn=±5 /=search Esc=clear"
+            info_parts = []
+            if self.game == "poe":
+                info_parts.append(f"Mode: {self.price_mode.title()}")
+            info_parts.append(f"Last update: {last_update}")
+            info_parts.append(f"Refresh: {int(self.config.refresh_interval)}s")
+            if info_parts:
+                lines.append(" | ".join(info_parts))
+
+            controls = "q=quit r=refresh o=options ↑/↓=rows PgUp/PgDn=±5 /=search Esc=clear"
             if self.category_cycle:
                 controls += " ←/→=category"
             if self.game == "poe":
                 controls += " Tab=mode"
-            parts = []
-            if self.game == "poe":
-                parts.append(f"Mode: {self.price_mode.title()}")
-            parts.append(f"Last update: {last_update}")
-            parts.append(f"Refresh: {int(self.config.refresh_interval)}s")
-            parts.append(controls)
-            status = " | ".join(parts)
             if self.search_query:
                 entries = self._current_entries()
-                status += f" | Filter: {self.search_query} ({len(entries)} items)"
+                controls += f" | Filter: {self.search_query} ({len(entries)} items)"
+            lines.append(controls)
         else:
             status = "Connecting to PoE Ninja..."
             if self.game == "poe":
                 status = f"Mode: {self.price_mode.title()} | {status}"
+            lines.append(status)
+
         if self.info_message:
             message, ts = self.info_message
             if time.time() - ts < 6:
-                status += f" | {message}"
+                if lines:
+                    lines[-1] += f" | {message}"
+                else:
+                    lines.append(message)
             else:
                 self.info_message = None
+
         if self.error_message:
             error_text = f" | {self.error_message}"
-            status = status + error_text
-        line = status[:width].ljust(width)
-        attributes = curses.A_DIM
-        if self.error_message and curses.has_colors():
-            attributes = curses.color_pair(5) | curses.A_BOLD
-        self._addstr(stdscr, y, 0, line, attributes)
+            if lines:
+                lines[-1] += error_text
+                error_line_index = len(lines) - 1
+            else:
+                lines.append(error_text)
+                error_line_index = 0
+
+        rendered_lines = 0
+        for idx, text in enumerate(lines):
+            if y + idx >= max_y:
+                break
+            line_text = text[:width].ljust(width)
+            attributes = curses.A_DIM
+            if error_line_index is not None and idx == error_line_index and curses.has_colors():
+                attributes = curses.color_pair(5) | curses.A_BOLD
+            self._addstr(stdscr, y + idx, 0, line_text, attributes)
+            rendered_lines += 1
+
+        next_row = y + rendered_lines
+        if next_row < max_y:
+            self._addstr(stdscr, next_row, 0, " " * width, curses.A_DIM)
 
     def _draw_message_block(
         self,
@@ -805,6 +863,177 @@ class TrackerUI:
             text = lines[idx][:width].center(width, " ")
             self._addstr(stdscr, offset_y + idx, start_x, text)
 
+    def _draw_vertical_span(
+        self,
+        stdscr: "curses._CursesWindow",
+        x: int,
+        start_y: int,
+        end_y: int,
+        attributes: int = 0,
+    ) -> None:
+        max_y, max_x = stdscr.getmaxyx()
+        if x < 0 or x >= max_x:
+            return
+        vertical_char = "│"
+        lower = max(0, min(start_y, max_y))
+        upper = max(0, min(end_y, max_y))
+        for row in range(lower, upper):
+            self._addstr(stdscr, row, x, vertical_char, attributes)
+
+    def _prompt_input(
+        self,
+        stdscr: "curses._CursesWindow",
+        prompt: str,
+        default: str = "",
+    ) -> Optional[str]:
+        height, width = stdscr.getmaxyx()
+        line = max(0, height - 1)
+        prompt_text = f"{prompt} "
+        if default:
+            prompt_text = f"{prompt} [{default}] "
+        curses.echo()
+        stdscr.nodelay(False)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        try:
+            stdscr.move(line, 0)
+            stdscr.clrtoeol()
+            self._addstr(stdscr, line, 0, prompt_text[: width - 1])
+            stdscr.refresh()
+            max_input = max(1, width - len(prompt_text) - 1)
+            raw = stdscr.getstr(line, min(len(prompt_text), width - 1), max_input)
+        except curses.error:
+            raw = None
+        finally:
+            curses.noecho()
+            stdscr.nodelay(True)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+        if raw is None:
+            return None
+        value = raw.decode("utf-8", errors="ignore").strip()
+        return value if value else ""
+
+    def _show_options_menu(self, stdscr: "curses._CursesWindow") -> None:
+        self._set_info_message("Options: Press Enter to keep existing values.")
+        stdscr.refresh()
+
+        game_prompt = "Game (1=PoE, 2=PoE2)"
+        current_game = "1" if self.game == "poe" else "2"
+        game_input = self._prompt_input(stdscr, game_prompt, current_game)
+
+        league_input = self._prompt_input(stdscr, "League", self.config.league)
+
+        interval_input = self._prompt_input(
+            stdscr,
+            "Refresh interval seconds",
+            f"{int(self.config.refresh_interval)}",
+        )
+
+        limit_input = self._prompt_input(stdscr, "Item limit", f"{self.config.limit}")
+
+        new_game = self.game
+        if game_input is not None and game_input != "":
+            if game_input in {"1", "poe"}:
+                new_game = "poe"
+            elif game_input in {"2", "poe2"}:
+                new_game = "poe2"
+            else:
+                self._set_info_message("Invalid game selection. Keeping previous value.")
+
+        new_league = self.config.league
+        if league_input:
+            new_league = league_input
+
+        new_interval = self.config.refresh_interval
+        if interval_input:
+            try:
+                new_interval = max(60.0, float(interval_input))
+            except ValueError:
+                self._set_info_message("Invalid interval. Keeping previous value.")
+
+        new_limit = self.config.limit
+        if limit_input:
+            try:
+                new_limit = max(1, int(limit_input))
+            except ValueError:
+                self._set_info_message("Invalid limit. Keeping previous value.")
+
+        changed = self._apply_options_changes(new_game, new_league, new_interval, new_limit)
+        if changed:
+            self._set_info_message("Options updated")
+        else:
+            self._set_info_message("Options unchanged")
+
+    def _apply_options_changes(
+        self,
+        game: str,
+        league: str,
+        interval: float,
+        limit: int,
+    ) -> bool:
+        changed = False
+        if game not in {"poe", "poe2"}:
+            game = "poe2"
+        if game != self.game:
+            changed = True
+            self.game = game
+            self.config.game = game
+            self._price_modes = ("stash", "exchange") if game == "poe" else ("stash",)
+            if self.price_mode not in self._price_modes:
+                self.price_mode = self._price_modes[0]
+                self.price_mode_index = 0
+            else:
+                self.price_mode_index = self._price_modes.index(self.price_mode)
+            self.config.price_mode = self.price_mode
+            previous_category = self.config.category
+            self.category_cycle = self._build_category_cycle()
+            if self.category_cycle:
+                normalized_catalog = {self._normalize_category(name): idx for idx, name in enumerate(self.category_cycle)}
+                norm_prev = self._normalize_category(previous_category)
+                if norm_prev in normalized_catalog:
+                    self.category_index = normalized_catalog[norm_prev]
+                else:
+                    self.category_index = 0
+                self.config.category = self.category_cycle[self.category_index]
+            else:
+                self.config.category = ""
+
+        sanitized_league = league.strip()
+        if sanitized_league and sanitized_league != self.config.league:
+            changed = True
+            self.config.league = sanitized_league
+
+        if interval != self.config.refresh_interval:
+            changed = True
+            self.config.refresh_interval = interval
+            self.snapshot_cache.ttl = max(interval, DEFAULT_CACHE_TTL)
+
+        if limit != self.config.limit:
+            changed = True
+            self.config.limit = limit
+            self._clamp_selection()
+
+        if changed:
+            self._settings.update(
+                {
+                    "game": self.config.game,
+                    "league": self.config.league,
+                    "interval": self.config.refresh_interval,
+                    "limit": self.config.limit,
+                }
+            )
+            save_settings(self._settings)
+            self.config.settings = self._settings
+            self.snapshot = None
+            self._force_refresh = True
+            self.last_refresh = 0.0
+        return changed
+
     @staticmethod
     def _format_row(cells: list[str], widths: list[int]) -> str:
         padded = []
@@ -816,7 +1045,9 @@ class TrackerUI:
     @staticmethod
     def _calculate_column_widths(total_width: int, headers: list[str]) -> list[int]:
         base_widths = {
-            "Rank": 2,
+            "#": 4,
+            "Rank": 4,
+            "Item": 45,
             "Currency": 30,
             "Exalted": 12,
             "Chaos": 12,

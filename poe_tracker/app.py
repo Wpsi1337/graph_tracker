@@ -9,6 +9,7 @@ from typing import Iterable, Optional
 import curses
 
 from .ui import TrackerConfig, TrackerUI
+from .settings import load_settings, save_settings
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -18,8 +19,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--league",
-        default="Rise of the Abyssal",
-        help="League to track (default: %(default)s)",
+        default=None,
+        help="League to track (default: value saved in tracker_config.json)",
     )
     parser.add_argument(
         "--category",
@@ -29,8 +30,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--game",
         choices=["poe", "poe2"],
-        default="poe2",
-        help="Game context for PoE Ninja API (poe or poe2) (default: %(default)s)",
+        default=None,
+        help="Game context for PoE Ninja API (poe or poe2) (default: value saved in tracker_config.json)",
     )
     parser.add_argument(
         "--ninja-cookie",
@@ -40,32 +41,47 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--limit",
         type=int,
-        default=50,
-        help="Number of currencies to display (default: %(default)s)",
+        default=None,
+        help="Number of currencies to display (default: value saved in tracker_config.json)",
     )
     parser.add_argument(
         "--interval",
         type=float,
-        default=3600.0,
-        help="Refresh interval in seconds (default: %(default)s)",
+        default=None,
+        help="Refresh interval in seconds (default: value saved in tracker_config.json)",
     )
     return parser
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> TrackerConfig:
+    settings = load_settings()
     parser = build_argument_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
-    if args.limit <= 0:
-        parser.error("--limit must be greater than zero")
-    if args.interval < 60:
-        parser.error("--interval must be at least 60 seconds to respect API rate limits")
+    if args.game:
+        settings["game"] = args.game
+    if args.league:
+        settings["league"] = args.league
+    if args.limit is not None:
+        if args.limit <= 0:
+            parser.error("--limit must be greater than zero")
+        settings["limit"] = args.limit
+    if args.interval is not None:
+        if args.interval < 60:
+            parser.error("--interval must be at least 60 seconds to respect API rate limits")
+        settings["interval"] = args.interval
+    save_settings(settings)
+    game = settings["game"]
+    league = settings["league"]
+    limit = int(settings["limit"])
+    interval = float(settings["interval"])
     return TrackerConfig(
-        league=args.league,
+        league=league,
         category=args.category,
-        game=args.game,
-        limit=args.limit,
-        refresh_interval=args.interval,
+        game=game,
+        limit=limit,
+        refresh_interval=interval,
         poe_ninja_cookie=args.ninja_cookie,
+        settings=settings,
     )
 
 

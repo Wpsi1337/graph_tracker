@@ -5,8 +5,9 @@ Lightweight curses terminal UI for visualising Path of Exile currency prices via
 ## Features
 
 - Live currency overview for both Path of Exile 1 and Path of Exile 2 leagues
-- Built‑in category catalogue for PoE1 (Currency, Fragment, BaseType, UniqueWeapon, …) so new tabs work instantly
+- Built-in category catalogue for PoE1 (Currency, Fragment, BaseType, UniqueWeapon, …) so new tabs work instantly
 - Stash vs. exchange price mode toggle for PoE1 (falls back automatically if exchange data is unavailable)
+- First-run interactive setup stores your preferred game and league in `tracker_config.json` (and an in-app options menu lets you tweak them later)
 - Refresh interval control to remain polite to the public API
 - Keyboard navigation with highlighted selection
 - `/` search that doubles as an instant category jump (press <kbd>Enter</kbd> to switch to the matching overview)
@@ -24,17 +25,19 @@ Lightweight curses terminal UI for visualising Path of Exile currency prices via
 ## Usage
 
 ```bash
-python -m poe_tracker --league "Rise of the Abyssal" --category Currency --limit 35 --interval 120
+python -m poe_tracker
 ```
+
+- On first launch you will be prompted to pick PoE or PoE2 and enter the league; the answers are stored in `tracker_config.json` and reused on subsequent runs. Press `o` at any time to revisit those options in the TUI.
 
 Arguments:
 
-- `--league`: target Path of Exile league (default `Rise of the Abyssal`)
-- `--category`: PoE Ninja overview category (`Currency`, `Fragment`, `UniqueWeapon`, …)
-- `--game`: set `poe2` (default) or `poe` for the original client
+- `--league`: override the saved league for this run (`Standard` `Keepers` `Rise of the Abyssal`)
+- `--category`: choose the initial PoE Ninja overview category (`Currency`, `Fragment`, `UniqueWeapon`, …)
+- `--game`: override the saved game context (`poe` or `poe2`)
 - `--ninja-cookie`: optional PoE.Ninja session cookie (or set `POE_NINJA_COOKIE`) for authenticated endpoints
-- `--limit`: number of currencies to list
-- `--interval`: refresh cadence in seconds (minimum 10s)
+- `--limit`: override the saved number of currencies to list
+- `--interval`: override the refresh cadence in seconds (minimum 60s)
 
 ## Key Bindings
 
@@ -43,12 +46,14 @@ Arguments:
 - `PgUp` / `PgDn`: jump several rows
 - `←` / `→`: cycle categories
 - `Tab`: toggle between *Stash* and *Exchange* pricing (PoE1 only; automatically falls back to stash when exchange data is unavailable)
+- `o`: open the Options menu (change game, league, refresh interval, and item limit)
 - `r`: force refresh
 - `q`: quit
-- `/`: search entries (press <kbd>Enter</kbd> on a query such as `currency` or `basetype` to jump directly to that category)
+- `/`: (fuzzy)search entries (press <kbd>Enter</kbd> on a query such as `currency` or `basetype` to jump directly to that category)
 - `Esc`: clear search
 ## Notes
 
 - The PoE Ninja API enforces rate limits; the tool defaults to a 120 second refresh to stay within limits.
 - When the API is unreachable, the status bar reports the failure and the UI continues to retry on the configured cadence.
 - Exchange endpoints for very new leagues can return `404`. The tracker will show an info message and stick to stash data until exchange prices become available.
+- The CLI flags still work as overrides, but all persistent settings live in `tracker_config.json` (git-ignored by default).
