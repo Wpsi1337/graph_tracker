@@ -391,9 +391,7 @@ class TrackerUI:
     def _compute_exalted_values(self, entries: List[CurrencyEntry]) -> None:
         exalt_price = self._extract_exalt_price(entries)
         if exalt_price is None:
-            if self._exalt_baseline is None:
-                self._exalt_baseline = self._find_exalt_price_from_cache()
-            exalt_price = self._exalt_baseline
+            exalt_price = self._get_currency_baseline()
         else:
             self._exalt_baseline = exalt_price
         if exalt_price is None or exalt_price <= 0:
@@ -402,19 +400,28 @@ class TrackerUI:
             entry.exalt_value = (entry.chaos_value / exalt_price) if entry.chaos_value else None
 
     def _extract_exalt_price(self, entries: List[CurrencyEntry]) -> Optional[float]:
-        candidates: List[float] = []
+        def _maybe_update(current: Optional[float], candidate: float) -> float:
+            if current is None or candidate < current:
+                return candidate
+            return current
+
+        best: Optional[float] = None
         for entry in entries:
             if entry.chaos_value <= 0:
                 continue
-            name = entry.name.lower()
-            details = (entry.details_id or "").lower()
-            if "exalted orb" in name and "perfect" not in name and "greater" not in name:
-                candidates.append(entry.chaos_value)
-            elif details == "exalted-orb":
-                candidates.append(entry.chaos_value)
-        if not candidates:
-            return None
-        return min(candidates)
+            details = (entry.details_id or "").strip().lower()
+            if details == "exalted-orb":
+                best = _maybe_update(best, entry.chaos_value)
+        if best is not None:
+            return best
+
+        for entry in entries:
+            if entry.chaos_value <= 0:
+                continue
+            normalized_name = entry.name.strip().lower()
+            if normalized_name == "exalted orb":
+                best = _maybe_update(best, entry.chaos_value)
+        return best
 
     def _find_exalt_price_from_cache(self) -> Optional[float]:
         best: Optional[float] = None
@@ -425,12 +432,19 @@ class TrackerUI:
                 break
         return best
 
+    def _get_currency_baseline(self) -> Optional[float]:
+        currency_snapshot = self.snapshot_cache.get("currency")
+        if currency_snapshot:
+            price = self._extract_exalt_price(currency_snapshot.entries)
+            if price:
+                self._exalt_baseline = price
+                return price
+        return self._exalt_baseline
+
     def _ensure_exalted_values(self, snapshot: CurrencySnapshot) -> None:
         if not snapshot or not snapshot.entries:
             return
-        needs_update = any(entry.exalt_value is None for entry in snapshot.entries)
-        if needs_update:
-            self._compute_exalted_values(snapshot.entries)
+        self._compute_exalted_values(snapshot.entries)
 
     def _set_info_message(self, message: str) -> None:
         if not message:
@@ -487,7 +501,7 @@ class TrackerUI:
         if header_y >= start_y + height:
             return
 
-        headers = ["Rank", "Currency", "Exalted", "Chaos", "Divine", "Trades"]
+        headers = ["Rank", "Currency", "Exalted", "Chaos", "Divine", "Volume/Hour"]
         column_widths = self._calculate_column_widths(width, headers)
         header_line = self._format_row(headers, column_widths)
         attributes = curses.A_BOLD
