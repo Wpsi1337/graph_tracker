@@ -10,6 +10,8 @@ Lightweight curses terminal UI for visualising Path of Exile currency prices via
 - Inline ASCII sparkline showing recent trend for the selected currency
 - Minimal dependencies: relies solely on the Python standard library
 
+<image-card alt="Alternative text" src="images/currency_view.png" ></image-card>
+<image-card alt="Alternative text" src="images/omen_view.png" ></image-card>
 ## Requirements
 
 - Python 3.10 or later
@@ -19,7 +21,7 @@ Lightweight curses terminal UI for visualising Path of Exile currency prices via
 ## Usage
 
 ```bash
-python -m poe_tracker --league "Rise of the Abyssal" --category Currency --limit 15 --interval 120
+python -m poe_tracker --league "Rise of the Abyssal" --category Currency --limit 35 --interval 120
 ```
 
 Arguments:
@@ -38,7 +40,8 @@ Arguments:
 - `PgUp` / `PgDn`: jump several rows
 - `r`: force refresh
 - `q`: quit
-
+- `/`: fuzzy search
+- `Esc`: clear search
 ## Notes
 
 - The PoE Ninja API enforces rate limits; the tool defaults to a 120 second refresh to stay within limits.
