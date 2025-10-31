@@ -28,6 +28,55 @@ MAX_DETAIL_ENTRIES = 50
 
 _PUNCT_CLEANER = re.compile(r"[^\w\s-]+")
 
+POE_CURRENCY_OVERVIEW_TYPES: List[str] = [
+    "Currency",
+    "Fragment",
+]
+
+POE_ITEM_OVERVIEW_TYPES: List[str] = [
+    "AllflameEmber",
+    "BaseType",
+    "Beast",
+    "BlightedMap",
+    "BlightRavagedMap",
+    "ClusterJewel",
+    "Coffin",
+    "DeliriumOrb",
+    "DivinationCard",
+    "Essence",
+    "Fossil",
+    "HelmetEnchant",
+    "Incubator",
+    "Invitation",
+    "Map",
+    "Memory",
+    "Oil",
+    "Omen",
+    "Resonator",
+    "Scarab",
+    "SkillGem",
+    "Tattoo",
+    "UniqueAccessory",
+    "UniqueArmour",
+    "UniqueFlask",
+    "UniqueJewel",
+    "UniqueMap",
+    "UniqueRelic",
+    "UniqueWeapon",
+    "Vial",
+]
+
+_POE_CURRENCY_TYPE_KEYS = {entry.strip().lower() for entry in POE_CURRENCY_OVERVIEW_TYPES}
+_POE_ITEM_TYPE_KEYS = {entry.strip().lower() for entry in POE_ITEM_OVERVIEW_TYPES}
+
+def _is_poe_currency_category(category: str) -> bool:
+    return category.strip().lower() in _POE_CURRENCY_TYPE_KEYS
+
+
+def _is_poe_item_category(category: str) -> bool:
+    return category.strip().lower() in _POE_ITEM_TYPE_KEYS
+
+
 POE2_OVERVIEW_ALIASES: Dict[str, List[str]] = {
     "currency": ["Currency", "currency"],
     "fragments": ["Fragments", "fragments", "fragment"],
@@ -357,12 +406,21 @@ def fetch_currency_snapshot(
     game: str = "poe2",
     timeout: int = DEFAULT_TIMEOUT,
     ninja_cookie: Optional[str] = None,
+    price_mode: str = "stash",
 ) -> CurrencySnapshot:
     """Fetch and parse the currency overview for the specified league."""
     normalized_game = (game or "poe2").lower()
+    normalized_category = (category or "").strip()
+    normalized_mode = (price_mode or "stash").strip().lower()
     if normalized_game == "poe2":
-        return _fetch_poe2_snapshot(league, category, timeout, ninja_cookie)
-    return _fetch_poe_snapshot(league, category, timeout, ninja_cookie)
+        return _fetch_poe2_snapshot(league, normalized_category or "Currency", timeout, ninja_cookie)
+    if normalized_game == "poe":
+        if normalized_mode == "exchange" and _is_poe_currency_category(normalized_category):
+            return _fetch_poe_exchange_snapshot(league, normalized_category, timeout, ninja_cookie)
+        if _is_poe_item_category(normalized_category):
+            return _fetch_poe_item_snapshot(league, normalized_category, timeout, ninja_cookie)
+        return _fetch_poe_snapshot(league, normalized_category or "Currency", timeout, ninja_cookie)
+    return _fetch_poe_snapshot(league, normalized_category or "Currency", timeout, ninja_cookie)
 
 
 def _merge_entry_attributes(target: CurrencyEntry, source: CurrencyEntry) -> None:
@@ -441,6 +499,57 @@ def _fetch_poe_snapshot(
     snapshot = _parse_snapshot_payload(data, league, category, "currencyoverview")
     if snapshot is None:
         raise ApiError("PoE currency overview response missing expected data.")
+    _apply_exalted_values(snapshot.entries)
+    return snapshot
+
+
+def _fetch_poe_exchange_snapshot(
+    league: str,
+    category: str,
+    timeout: int,
+    ninja_cookie: Optional[str] = None,
+) -> CurrencySnapshot:
+    query = urllib.parse.urlencode({"league": league, "type": category})
+    url = f"{POE_API_BASE_URL.replace('/api/data', '/poe1/api/economy')}/exchange/current/overview?{query}"
+    payload = _make_request(url, timeout, ninja_cookie=ninja_cookie)
+    data = json.loads(payload)
+    working = data.get("payload") if isinstance(data, dict) else None
+    if isinstance(working, dict) and working:
+        exchange_source = working
+    elif isinstance(data, dict):
+        exchange_source = data
+    else:
+        exchange_source = {}
+    rows, icon_lookup, name_lookup, divine_rate = _prepare_exchange_rows(exchange_source)
+    if not rows:
+        raise ApiError(f"No exchange data returned for category '{category}' in league '{league}'.")
+    entries = _parse_currency_lines(rows, divine_rate, icon_lookup, name_lookup)
+    entries = _deduplicate_entries(entries)
+    if divine_rate and divine_rate > 0:
+        for entry in entries:
+            entry.divine_value = entry.chaos_value / divine_rate if entry.chaos_value else None
+    entries.sort(key=lambda item: item.chaos_value, reverse=True)
+    _apply_exalted_values(entries)
+    return CurrencySnapshot(
+        league=league,
+        entries=entries,
+        fetched_at=time.time(),
+        source_type=f"{category}:poe-exchange",
+    )
+
+def _fetch_poe_item_snapshot(
+    league: str,
+    category: str,
+    timeout: int,
+    ninja_cookie: Optional[str] = None,
+) -> CurrencySnapshot:
+    query = urllib.parse.urlencode({"league": league, "type": category})
+    url = f"{POE_API_BASE_URL}/itemoverview?{query}"
+    payload = _make_request(url, timeout, ninja_cookie=ninja_cookie)
+    data = json.loads(payload)
+    snapshot = _parse_snapshot_payload(data, league, category, "itemoverview")
+    if snapshot is None:
+        raise ApiError("PoE item overview response missing expected data.")
     _apply_exalted_values(snapshot.entries)
     return snapshot
 

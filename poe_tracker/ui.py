@@ -9,6 +9,8 @@ from typing import List, Optional
 from .api import (
     ApiError,
     fetch_currency_snapshot,
+    POE_CURRENCY_OVERVIEW_TYPES,
+    POE_ITEM_OVERVIEW_TYPES,
     POE2_FALLBACK_OVERVIEWS,
     POE2_OVERVIEW_ALIASES,
 )
@@ -25,6 +27,7 @@ class TrackerConfig:
     limit: int = 15
     refresh_interval: float = 120.0
     poe_ninja_cookie: Optional[str] = None
+    price_mode: str = "stash"
 
 
 @dataclass(slots=True)
@@ -32,6 +35,7 @@ class DisplayEntry:
     category: str
     normalized_category: str
     entry: CurrencyEntry
+    price_mode: str = "stash"
 
 
 class TrackerUI:
@@ -44,6 +48,11 @@ class TrackerUI:
         self.selected_index = 0
         self.last_refresh = 0.0
         self.should_exit = False
+        self.game = (self.config.game or "poe2").strip().lower()
+        self._price_modes = ("stash", "exchange") if self.game == "poe" else ("stash",)
+        self.price_mode = self._sanitize_price_mode(self.config.price_mode)
+        self.price_mode_index = self._price_modes.index(self.price_mode)
+        self.config.price_mode = self.price_mode
         self.category_cycle = self._build_category_cycle()
         self.category_index = self._locate_category_index(self.config.category)
         if self.category_cycle:
@@ -97,24 +106,32 @@ class TrackerUI:
         curses.flushinp()
 
     def _build_category_cycle(self) -> list[str]:
-        if self.config.game.lower() != "poe2":
-            return []
         ordered: list[str] = []
         seen: set[str] = set()
-        for name in POE2_FALLBACK_OVERVIEWS:
-            cleaned = name.strip()
-            norm = self._normalize_category(cleaned)
-            if cleaned and norm not in seen:
-                ordered.append(cleaned)
-                seen.add(norm)
-        for variants in POE2_OVERVIEW_ALIASES.values():
-            if not variants:
-                continue
-            display = variants[0].strip()
-            norm = self._normalize_category(display)
-            if display and norm not in seen:
-                ordered.append(display)
-                seen.add(norm)
+        if self.game == "poe2":
+            for name in POE2_FALLBACK_OVERVIEWS:
+                cleaned = name.strip()
+                norm = self._normalize_category(cleaned)
+                if cleaned and norm not in seen:
+                    ordered.append(cleaned)
+                    seen.add(norm)
+            for variants in POE2_OVERVIEW_ALIASES.values():
+                if not variants:
+                    continue
+                display = variants[0].strip()
+                norm = self._normalize_category(display)
+                if display and norm not in seen:
+                    ordered.append(display)
+                    seen.add(norm)
+        elif self.game == "poe":
+            for name in [*POE_CURRENCY_OVERVIEW_TYPES, *POE_ITEM_OVERVIEW_TYPES]:
+                cleaned = name.strip()
+                norm = self._normalize_category(cleaned)
+                if cleaned and norm not in seen:
+                    ordered.append(cleaned)
+                    seen.add(norm)
+        else:
+            return []
         current = self.config.category.strip()
         if current:
             normalized_current = self._normalize_category(current)
@@ -125,6 +142,25 @@ class TrackerUI:
     @staticmethod
     def _normalize_category(value: Optional[str]) -> str:
         return (value or "").strip().lower()
+
+    def _sanitize_price_mode(self, value: Optional[str]) -> str:
+        candidate = (value or "").strip().lower()
+        if candidate in self._price_modes:
+            return candidate
+        return self._price_modes[0]
+
+    def _cache_key(self, normalized_category: str, mode: Optional[str] = None) -> str:
+        if self.game == "poe":
+            actual_mode = mode or self.price_mode
+            return f"{normalized_category}|{actual_mode}"
+        return normalized_category
+
+    def _cache_key_components(self, cache_key: str) -> tuple[str, Optional[str]]:
+        if "|" in cache_key:
+            base, mode = cache_key.split("|", 1)
+            if mode in self._price_modes:
+                return base, mode
+        return cache_key, None
 
     def _locate_category_index(self, category: str) -> int:
         if not self.category_cycle:
@@ -141,7 +177,8 @@ class TrackerUI:
         normalized_category = self._normalize_category(self.config.category)
         now = time.time()
 
-        cached_snapshot = self.snapshot_cache.get(normalized_category)
+        cache_key = self._cache_key(normalized_category)
+        cached_snapshot = self.snapshot_cache.get(cache_key)
         if cached_snapshot and not force:
             self._ensure_exalted_values(cached_snapshot)
             self.snapshot = cached_snapshot
@@ -157,19 +194,41 @@ class TrackerUI:
                 self.config.category,
                 game=self.config.game,
                 ninja_cookie=self.config.poe_ninja_cookie,
+                price_mode=self.price_mode,
             )
             self._ensure_exalted_values(snapshot)
             self.snapshot = snapshot
-            self.snapshot_cache.set(normalized_category, snapshot)
+            self.snapshot_cache.set(cache_key, snapshot)
             self.selected_index = min(self.selected_index, max(0, len(snapshot.entries) - 1))
             self.error_message = None
             self.last_refresh = now
             self._refresh_search_results()
         except ApiError as exc:
-            self.error_message = f"Fetch failed: {exc}"
+            message = str(exc)
+            self.error_message = f"Fetch failed: {message}"
             self.last_refresh = now
-            self.snapshot_cache.remove(normalized_category)
-            if "No data returned" in str(exc) and self._remove_category(normalized_category):
+            self.snapshot_cache.remove(cache_key)
+            if self.game == "poe" and self.price_mode == "exchange":
+                self.price_mode_index = 0
+                self.price_mode = self._price_modes[self.price_mode_index]
+                self.config.price_mode = self.price_mode
+                fallback = self._get_cached_snapshot(normalized_category, self.price_mode)
+                if fallback:
+                    self._ensure_exalted_values(fallback)
+                    self.snapshot = fallback
+                    self.error_message = None
+                    self._set_info_message("Exchange prices unavailable; showing stash data.")
+                    self.last_refresh = now
+                    self._refresh_search_results()
+                    return
+                else:
+                    self._set_info_message("Exchange prices unavailable.")
+            removable_patterns = ("No data returned", "HTTP Error 404", "404: Not Found")
+            if (
+                any(pattern in message for pattern in removable_patterns)
+                and self.price_mode == "stash"
+                and self._remove_category(normalized_category)
+            ):
                 self.error_message = None
                 return
 
@@ -181,6 +240,11 @@ class TrackerUI:
             if self.search_query or self.search_active:
                 self._clear_search()
                 return
+        backtab_key = getattr(curses, "KEY_BTAB", None)
+        if key == 9 or (backtab_key is not None and key == backtab_key):
+            if self.game == "poe":
+                self._toggle_price_mode()
+            return
         if self.search_active:
             if self._process_search_key(key):
                 return
@@ -235,6 +299,20 @@ class TrackerUI:
             self.category_index = next_index
         self.category_index = original_index
 
+    def _toggle_price_mode(self) -> None:
+        if self.game != "poe" or len(self._price_modes) <= 1:
+            self._set_info_message("Exchange pricing not available")
+            return
+        self.price_mode_index = (self.price_mode_index + 1) % len(self._price_modes)
+        self.price_mode = self._price_modes[self.price_mode_index]
+        self.config.price_mode = self.price_mode
+        self.snapshot = None
+        self.selected_index = 0
+        self.scroll_offset = 0
+        self.last_refresh = 0.0
+        self._force_refresh = True
+        self._set_info_message(f"Price mode: {self.price_mode.title()}")
+
     def _switch_category(self, category_name: str, prefer_cache: bool = True) -> bool:
         normalized = self._normalize_category(category_name)
         if not category_name:
@@ -263,7 +341,11 @@ class TrackerUI:
         for idx, name in enumerate(list(self.category_cycle)):
             if self._normalize_category(name) == normalized_category:
                 self.category_cycle.pop(idx)
-                self.snapshot_cache.remove(normalized_category)
+                if self.game == "poe":
+                    for mode in self._price_modes:
+                        self.snapshot_cache.remove(self._cache_key(normalized_category, mode))
+                else:
+                    self.snapshot_cache.remove(normalized_category)
                 if not self.category_cycle:
                     self.config.category = ""
                     self.snapshot = None
@@ -278,8 +360,9 @@ class TrackerUI:
                 return True
         return False
 
-    def _get_cached_snapshot(self, normalized_category: str) -> Optional[CurrencySnapshot]:
-        snapshot = self.snapshot_cache.get(normalized_category)
+    def _get_cached_snapshot(self, normalized_category: str, mode: Optional[str] = None) -> Optional[CurrencySnapshot]:
+        cache_key = self._cache_key(normalized_category, mode)
+        snapshot = self.snapshot_cache.get(cache_key)
         if snapshot:
             self._ensure_exalted_values(snapshot)
         return snapshot
@@ -288,7 +371,7 @@ class TrackerUI:
         if not self.search_active:
             self.search_active = True
             self.scroll_offset = 0
-            self._set_info_message("Search mode active (Esc to clear)")
+            self._set_info_message("Search mode active (Enter jumps to category, Esc to clear)")
         self._refresh_search_results()
 
     def _process_search_key(self, key: int) -> bool:
@@ -299,6 +382,8 @@ class TrackerUI:
                 self._clear_search()
             return True
         if key in (curses.KEY_ENTER, 10, 13):
+            if self.search_query and self._try_jump_to_category(self.search_query):
+                return True
             self.search_active = False
             return True
         if 32 <= key <= 126:
@@ -328,17 +413,64 @@ class TrackerUI:
         self._clamp_selection()
         self._set_info_message("Search cleared")
 
+    def _try_jump_to_category(self, query: str) -> bool:
+        normalized_query = self._normalize_category(query)
+        if not normalized_query or not self.category_cycle:
+            return False
+        sanitized_query = re.sub(r"[\s_-]+", "", normalized_query)
+        if not sanitized_query:
+            return False
+        exact_match: Optional[str] = None
+        partial_matches: list[str] = []
+        for name in self.category_cycle:
+            norm = self._normalize_category(name)
+            if not norm:
+                continue
+            sanitized_norm = re.sub(r"[\s_-]+", "", norm)
+            if sanitized_norm == sanitized_query:
+                exact_match = name
+                break
+            if sanitized_query in sanitized_norm:
+                partial_matches.append(name)
+        target: Optional[str] = None
+        if exact_match:
+            target = exact_match
+        elif len(partial_matches) == 1:
+            target = partial_matches[0]
+        elif partial_matches:
+            preview = ", ".join(partial_matches[:3])
+            if len(partial_matches) > 3:
+                preview += ", ..."
+            self._set_info_message(f"Multiple categories match: {preview}")
+            return False
+        if not target:
+            return False
+        if self._switch_category(target):
+            self.search_query = ""
+            self.search_results = []
+            self.search_active = False
+            self.scroll_offset = 0
+            self._clamp_selection()
+            self._set_info_message(f"Category set to '{target}'")
+            return True
+        self._set_info_message(f"Unable to load category '{target}'")
+        return False
+
     def _collect_search_results(self, query: str) -> list[DisplayEntry]:
         if not query:
             return []
         needle = query.lower()
         matches: list[DisplayEntry] = []
-        for normalized, snapshot in self.snapshot_cache.items():
+        for cache_key, snapshot in self.snapshot_cache.items():
+            normalized, cache_mode = self._cache_key_components(cache_key)
             self._ensure_exalted_values(snapshot)
             display_name = self._category_display_name(normalized)
+            mode_label = cache_mode or "stash"
+            if cache_mode and cache_mode != "stash":
+                display_name = f"{display_name} ({cache_mode.title()})"
             for entry in snapshot.entries:
                 if needle in entry.name.lower():
-                    matches.append(DisplayEntry(display_name, normalized, entry))
+                    matches.append(DisplayEntry(display_name, normalized, entry, price_mode=mode_label))
         matches.sort(key=lambda item: item.entry.chaos_value, reverse=True)
         limit = max(self.config.limit, 1)
         return matches[:limit]
@@ -362,8 +494,10 @@ class TrackerUI:
             return []
         normalized = self._normalize_category(self.config.category)
         display_name = self._category_display_name(normalized)
+        if self.game == "poe" and self.price_mode != "stash":
+            display_name = f"{display_name} ({self.price_mode.title()})"
         entries = self.snapshot.top_entries(self.config.limit)
-        return [DisplayEntry(display_name, normalized, entry) for entry in entries]
+        return [DisplayEntry(display_name, normalized, entry, price_mode=self.price_mode) for entry in entries]
 
     def _format_entry_label(self, display: DisplayEntry) -> str:
         name = display.entry.name
@@ -424,16 +558,27 @@ class TrackerUI:
         return best
 
     def _find_exalt_price_from_cache(self) -> Optional[float]:
-        best: Optional[float] = None
-        for _, snapshot in self.snapshot_cache.items():
+        fallback: Optional[float] = None
+        for cache_key, snapshot in self.snapshot_cache.items():
+            normalized, mode = self._cache_key_components(cache_key)
+            if normalized != "currency":
+                continue
             price = self._extract_exalt_price(snapshot.entries)
-            if price:
-                best = price
-                break
-        return best
+            if not price:
+                continue
+            if mode in (None, "stash"):
+                return price
+            if fallback is None:
+                fallback = price
+        return fallback
 
     def _get_currency_baseline(self) -> Optional[float]:
-        currency_snapshot = self.snapshot_cache.get("currency")
+        if self.game == "poe":
+            currency_snapshot = self.snapshot_cache.get(self._cache_key("currency", "stash"))
+            if not currency_snapshot:
+                currency_snapshot = self.snapshot_cache.get(self._cache_key("currency", "exchange"))
+        else:
+            currency_snapshot = self.snapshot_cache.get("currency")
         if currency_snapshot:
             price = self._extract_exalt_price(currency_snapshot.entries)
             if price:
@@ -472,8 +617,9 @@ class TrackerUI:
         stdscr.refresh()
 
     def _render_header(self, stdscr: "curses._CursesWindow", width: int) -> None:
-        game_label = "PoE 2" if self.config.game.lower() == "poe2" else "PoE"
-        title = f" Path of Exile Currency Tracker [{game_label}] - {self.config.league} ({self.config.category}) "
+        game_label = "PoE 2" if self.game == "poe2" else "PoE"
+        mode_suffix = f" [{self.price_mode.title()}]" if self.game == "poe" else ""
+        title = f" Path of Exile Currency Tracker [{game_label}] - {self.config.league} ({self.config.category}{mode_suffix}) "
         padded = title.center(width, " ")
         attributes = curses.color_pair(1) | curses.A_BOLD if curses.has_colors() else curses.A_BOLD
         self._addstr(stdscr, 0, 0, padded[:width], attributes)
@@ -494,7 +640,8 @@ class TrackerUI:
         if self.search_query:
             label_text = f"Search: {self.search_query}"
         else:
-            label_text = f"Category: {self.config.category}" if self.config.category else "Category"
+            mode_suffix = f" [{self.price_mode.title()}]" if self.game == "poe" and self.config.category else ""
+            label_text = f"Category: {self.config.category}{mode_suffix}" if self.config.category else "Category"
         self._addstr(stdscr, start_y, start_x, label_text[:width], label_attr)
 
         header_y = start_y + 1
@@ -583,7 +730,12 @@ class TrackerUI:
             return
         graph_lines = render_graph_block(selected_entry.entry.sparkline, width, available_height)
         display_name = self._format_entry_label(selected_entry)
-        label = f" {display_name} price trend (receive, 7-day sparkline) "
+        mode_suffix = ""
+        if self.game == "poe" and not self.search_query:
+            active_mode = selected_entry.price_mode or self.price_mode
+            if active_mode != "stash":
+                mode_suffix = f" ({active_mode.title()})"
+        label = f" {display_name}{mode_suffix} price trend (receive, 7-day sparkline) "
         if self.search_query:
             label = f" {display_name} [{selected_entry.category}] price trend (receive, 7-day sparkline) "
         label = label[: width - 2]
@@ -604,12 +756,22 @@ class TrackerUI:
             controls = "q=quit r=refresh ↑/↓=rows PgUp/PgDn=±5 /=search Esc=clear"
             if self.category_cycle:
                 controls += " ←/→=category"
-            status = f"Last update: {last_update} | Refresh: {int(self.config.refresh_interval)}s | {controls}"
+            if self.game == "poe":
+                controls += " Tab=mode"
+            parts = []
+            if self.game == "poe":
+                parts.append(f"Mode: {self.price_mode.title()}")
+            parts.append(f"Last update: {last_update}")
+            parts.append(f"Refresh: {int(self.config.refresh_interval)}s")
+            parts.append(controls)
+            status = " | ".join(parts)
             if self.search_query:
                 entries = self._current_entries()
                 status += f" | Filter: {self.search_query} ({len(entries)} items)"
         else:
             status = "Connecting to PoE Ninja..."
+            if self.game == "poe":
+                status = f"Mode: {self.price_mode.title()} | {status}"
         if self.info_message:
             message, ts = self.info_message
             if time.time() - ts < 6:
