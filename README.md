@@ -14,9 +14,9 @@ Lightweight curses terminal UI for visualising Path of Exile currency prices via
 - Inline ASCII sparkline showing recent trend for the selected currency
 - Minimal dependencies: relies solely on the Python standard library
 
-![Currency overview screenshot](prev.png)
-![Omen overview screenshot](prev2.png)
-![Search overview screenshot](prev3.png)
+![Currency overview screenshot](images/prev1.png)
+![Omen overview screenshot](images/prev2.png)
+![Search overview screenshot](images/prev3.png)
 ## Requirements
 
 - Python 3.10 or later
