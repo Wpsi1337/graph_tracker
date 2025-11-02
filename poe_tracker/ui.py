@@ -55,6 +55,8 @@ class TrackerUI:
             "league": config.league,
             "interval": config.refresh_interval,
             "limit": config.limit,
+            "category": config.category,
+            "price_mode": config.price_mode,
         }
         self.config.settings = self._settings
         self.game = (self.config.game or "poe2").strip().lower()
@@ -92,6 +94,7 @@ class TrackerUI:
                 self._render(stdscr)
                 self._handle_input(stdscr)
         finally:
+            self._persist_settings()
             self._teardown_curses()
 
     def _initialize_curses(self, stdscr: "curses._CursesWindow") -> None:
@@ -159,17 +162,23 @@ class TrackerUI:
         return self._price_modes[0]
 
     def _cache_key(self, normalized_category: str, mode: Optional[str] = None) -> str:
-        if self.game == "poe":
-            actual_mode = mode or self.price_mode
-            return f"{normalized_category}|{actual_mode}"
-        return normalized_category
+        actual_mode = mode or self.price_mode
+        return f"{self.game}:{normalized_category}|{actual_mode}"
 
-    def _cache_key_components(self, cache_key: str) -> tuple[str, Optional[str]]:
-        if "|" in cache_key:
-            base, mode = cache_key.split("|", 1)
-            if mode in self._price_modes:
-                return base, mode
-        return cache_key, None
+    def _cache_key_components(self, cache_key: str) -> tuple[str, str, Optional[str]]:
+        game_prefix = self.game
+        base_key = cache_key
+        if ":" in cache_key:
+            maybe_game, remainder = cache_key.split(":", 1)
+            if maybe_game in {"poe", "poe2"}:
+                game_prefix = maybe_game
+                base_key = remainder
+        mode = None
+        if "|" in base_key:
+            base_key, candidate_mode = base_key.split("|", 1)
+            if candidate_mode in {"stash", "exchange"}:
+                mode = candidate_mode
+        return game_prefix, base_key, mode
 
     def _locate_category_index(self, category: str) -> int:
         if not self.category_cycle:
@@ -268,6 +277,7 @@ class TrackerUI:
             if self._process_search_key(key):
                 return
         if key in (ord("q"), ord("Q")):
+            self._persist_settings()
             self.should_exit = True
             return
         if key in (ord("r"), ord("R")):
@@ -474,7 +484,9 @@ class TrackerUI:
         needle = query.lower()
         matches: list[DisplayEntry] = []
         for cache_key, snapshot in self.snapshot_cache.items():
-            normalized, cache_mode = self._cache_key_components(cache_key)
+            key_game, normalized, cache_mode = self._cache_key_components(cache_key)
+            if key_game != self.game:
+                continue
             self._ensure_exalted_values(snapshot)
             display_name = self._category_display_name(normalized)
             mode_label = cache_mode or "stash"
@@ -572,8 +584,8 @@ class TrackerUI:
     def _find_exalt_price_from_cache(self) -> Optional[float]:
         fallback: Optional[float] = None
         for cache_key, snapshot in self.snapshot_cache.items():
-            normalized, mode = self._cache_key_components(cache_key)
-            if normalized != "currency":
+            key_game, normalized, mode = self._cache_key_components(cache_key)
+            if key_game != self.game or normalized != "currency":
                 continue
             price = self._extract_exalt_price(snapshot.entries)
             if not price:
@@ -585,12 +597,17 @@ class TrackerUI:
         return fallback
 
     def _get_currency_baseline(self) -> Optional[float]:
+        keys: list[str] = []
         if self.game == "poe":
-            currency_snapshot = self.snapshot_cache.get(self._cache_key("currency", "stash"))
-            if not currency_snapshot:
-                currency_snapshot = self.snapshot_cache.get(self._cache_key("currency", "exchange"))
+            keys.append(self._cache_key("currency", "stash"))
+            keys.append(self._cache_key("currency", "exchange"))
         else:
-            currency_snapshot = self.snapshot_cache.get("currency")
+            keys.append(self._cache_key("currency"))
+        currency_snapshot = None
+        for cache_key in keys:
+            currency_snapshot = self.snapshot_cache.get(cache_key)
+            if currency_snapshot:
+                break
         if currency_snapshot:
             price = self._extract_exalt_price(currency_snapshot.entries)
             if price:
@@ -660,7 +677,10 @@ class TrackerUI:
         if header_y >= start_y + height:
             return
 
-        headers = ["#", "Item", "Exalted", "Chaos", "Divine", "Volume/Hour"]
+        if self.game == "poe":
+            headers = ["#", "Item", "Chaos", "Exalted", "Divine", "Volume/Hour"]
+        else:
+            headers = ["#", "Item", "Exalted", "Chaos", "Divine", "Volume/Hour"]
         column_widths = self._calculate_column_widths(width, headers)
         separator_x = start_x + column_widths[0]
         header_line = self._format_row(headers, column_widths)
@@ -707,12 +727,22 @@ class TrackerUI:
             actual_index = self.scroll_offset + offset
             entry = display.entry
             name = self._format_entry_label(display)
+            if self.game == "poe":
+                value_cells = [
+                    entry.formatted_chaos(),
+                    entry.formatted_exalt(),
+                    entry.formatted_divine(),
+                ]
+            else:
+                value_cells = [
+                    entry.formatted_exalt(),
+                    entry.formatted_chaos(),
+                    entry.formatted_divine(),
+                ]
             cells = [
                 f"{actual_index + 1}",
                 name,
-                entry.formatted_exalt(),
-                entry.formatted_chaos(),
-                entry.formatted_divine(),
+                *value_cells,
                 f"{entry.trade_count:,}" if entry.trade_count else "--",
             ]
             row_text = self._format_row(cells, column_widths)
@@ -968,6 +998,21 @@ class TrackerUI:
             self._set_info_message("Options updated")
         else:
             self._set_info_message("Options unchanged")
+
+    def _persist_settings(self) -> None:
+        if not isinstance(self._settings, dict):
+            return
+        self._settings.update(
+            {
+                "game": self.game,
+                "league": self.config.league,
+                "interval": self.config.refresh_interval,
+                "limit": self.config.limit,
+                "category": self.config.category,
+                "price_mode": self.price_mode,
+            }
+        )
+        save_settings(self._settings)
 
     def _apply_options_changes(
         self,

@@ -12,6 +12,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "league": "Rise of the Abyssal",
     "interval": 3600.0,
     "limit": 50,
+    "category": "Currency",
+    "price_mode": "stash",
 }
 
 
@@ -20,26 +22,30 @@ def _prompt_initial_settings() -> Dict[str, Any]:
     print("Select game:")
     print(" 1: PoE (original client)")
     print(" 2: PoE2")
-    choice = input("Enter choice [2]: ").strip()
-    if choice == "1":
-        game = "poe"
-    elif choice == "2" or choice == "":
-        game = "poe2"
-    else:
-        print("Invalid choice. Defaulting to PoE2.")
-        game = "poe2"
 
-    league_prompt = "Enter target league"
-    default_league = DEFAULT_SETTINGS["league"]
-    league = input(f"{league_prompt} [{default_league}]: ").strip()
-    if not league:
-        league = default_league
+    game: Optional[str] = None
+    while game is None:
+        choice = input("Enter choice (1 or 2): ").strip()
+        if choice == "1":
+            game = "poe"
+        elif choice == "2":
+            game = "poe2"
+        else:
+            print("Please enter 1 for PoE or 2 for PoE2.")
+
+    league = ""
+    while not league:
+        league = input("Enter target league: ").strip()
+        if not league:
+            print("League cannot be blank.")
 
     settings = {
         "game": game,
         "league": league,
         "interval": DEFAULT_SETTINGS["interval"],
         "limit": DEFAULT_SETTINGS["limit"],
+        "category": DEFAULT_SETTINGS["category"],
+        "price_mode": DEFAULT_SETTINGS["price_mode"],
     }
     print(f"Configuration saved to {CONFIG_FILE}.")
     return settings
@@ -67,6 +73,14 @@ def _validate_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         limit = DEFAULT_SETTINGS["limit"]
     merged["limit"] = max(1, limit)
+
+    category = str(merged.get("category", DEFAULT_SETTINGS["category"])).strip()
+    merged["category"] = category or DEFAULT_SETTINGS["category"]
+
+    price_mode = str(merged.get("price_mode", DEFAULT_SETTINGS["price_mode"])).strip().lower()
+    if price_mode not in {"stash", "exchange"}:
+        price_mode = DEFAULT_SETTINGS["price_mode"]
+    merged["price_mode"] = price_mode
     return merged
 
 
@@ -91,4 +105,3 @@ def save_settings(settings: Dict[str, Any]) -> None:
             json.dump(sanitized, handle, indent=2)
     except OSError as exc:
         print(f"Warning: Failed to write settings ({exc}).", file=sys.stderr)
-

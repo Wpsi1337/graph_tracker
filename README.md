@@ -14,8 +14,9 @@ Lightweight curses terminal UI for visualising Path of Exile currency prices via
 - Inline ASCII sparkline showing recent trend for the selected currency
 - Minimal dependencies: relies solely on the Python standard library
 
-![Currency overview screenshot](images/currency_view.png)
-![Omen overview screenshot](images/omen_view.png)
+![Currency overview screenshot](prev.png)
+![Omen overview screenshot](prev2.png)
+![Search overview screenshot](prev3.png)
 ## Requirements
 
 - Python 3.10 or later
@@ -28,7 +29,8 @@ Lightweight curses terminal UI for visualising Path of Exile currency prices via
 python -m poe_tracker
 ```
 
-- On first launch you will be prompted to pick PoE or PoE2 and enter the league; the answers are stored in `tracker_config.json` and reused on subsequent runs. Press `o` at any time to revisit those options in the TUI.
+- On first launch the tracker asks you to choose PoE or PoE2 and type the league name (blank answers are no longer accepted). The selections, along with the active category and price mode, are stored in `tracker_config.json` and reused on subsequent runs. Press `o` at any time to revisit those options in the TUI.
+- Remove `tracker_config.json` if you want to rerun the initial prompts from scratch.
 
 Arguments:
 
@@ -56,4 +58,4 @@ Arguments:
 - The PoE Ninja API enforces rate limits; the tool defaults to a 120 second refresh to stay within limits.
 - When the API is unreachable, the status bar reports the failure and the UI continues to retry on the configured cadence.
 - Exchange endpoints for very new leagues can return `404`. The tracker will show an info message and stick to stash data until exchange prices become available.
-- The CLI flags still work as overrides, but all persistent settings live in `tracker_config.json` (git-ignored by default).
+- The CLI flags still work as overrides, but all persistent settings (game, league, category, limit, interval, price mode) live in `tracker_config.json` (git-ignored by default) and are now scoped per game so searches stay within your active client.

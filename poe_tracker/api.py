@@ -188,6 +188,16 @@ def _collect_keys(*values: object) -> List[str]:
     return keys
 
 
+def _normalize_divine_rate(divine_rate: Optional[float]) -> Optional[float]:
+    if divine_rate is None:
+        return None
+    if divine_rate <= 0:
+        return None
+    if divine_rate < 1.0:
+        return 1.0 / divine_rate
+    return divine_rate
+
+
 def _format_cookie(cookie: Optional[str]) -> Optional[str]:
     if cookie is None:
         return None
@@ -324,7 +334,9 @@ def _prepare_exchange_rows(
 
     core = exchange_data.get("core") or {}
     chaos_per_primary = _derive_chaos_per_primary(core)
-    divine_rate_from_core = _derive_divine_rate_from_core(core, chaos_per_primary)
+    divine_rate_from_core = _normalize_divine_rate(
+        _derive_divine_rate_from_core(core, chaos_per_primary)
+    )
 
     rows: List[dict] = []
     for line in lines:
@@ -341,58 +353,48 @@ def _prepare_exchange_rows(
         if not item_info:
             continue
 
-        if isinstance(line, dict):
-            if "detailsId" not in line and item_info.get("detailsId"):
-                line["detailsId"] = item_info.get("detailsId")
-            if "name" not in line and item_info.get("name"):
-                line["name"] = item_info.get("name")
-            if "currencyTypeName" not in line and item_info.get("name"):
-                line["currencyTypeName"] = item_info.get("name")
+        row = dict(line)
+        row["id"] = line_id
+        row.setdefault("detailsId", item_info.get("detailsId"))
+        canonical_name = item_info.get("name")
+        if canonical_name:
+            row.setdefault("name", canonical_name)
+            row.setdefault("currencyTypeName", canonical_name)
+        item_block = row.get("item")
+        if not isinstance(item_block, dict):
+            item_block = {}
+        item_block.setdefault("id", line_id)
+        if canonical_name:
+            item_block.setdefault("name", canonical_name)
+        if item_info.get("detailsId"):
+            item_block.setdefault("detailsId", item_info.get("detailsId"))
+        if item_info.get("icon"):
+            item_block.setdefault("icon", item_info.get("icon"))
+        row["item"] = item_block
 
-        row: dict = {
-            "id": line_id,
-            "detailsId": item_info.get("detailsId"),
-            "name": item_info.get("name"),
-            "item": {
-                "id": line_id,
-                "name": item_info.get("name"),
-                "detailsId": item_info.get("detailsId"),
-                "icon": item_info.get("icon"),
-            },
-        }
-        for key in (
-            "primaryValue",
-            "secondaryValue",
-            "volumePrimaryValue",
-            "volumeSecondaryValue",
-            "volume",
-            "maxVolumeCurrency",
-            "maxVolumeRate",
-        ):
-            if key in line:
-                row[key] = line.get(key)
-        sparkline = line.get("sparkline") or line.get("sparkLine")
-        if isinstance(sparkline, dict):
-            row["sparkLine"] = sparkline
-            row["sparkline"] = sparkline
-
-        primary_value = _extract_float(line.get("primaryValue"))
-        chaos_value = None
-        if chaos_per_primary is not None and primary_value is not None:
-            chaos_value = primary_value * chaos_per_primary
-        secondary_value = _extract_float(line.get("secondaryValue"))
-        if chaos_value is None and secondary_value is not None:
-            chaos_value = secondary_value
+        chaos_value = (
+            _extract_float(row.get("chaosValue"))
+            or _extract_float(row.get("chaosEquivalent"))
+            or _extract_float(row.get("valueChaos"))
+        )
+        if chaos_value is None:
+            chaos_value = _compute_exchange_chaos_value(row, chaos_per_primary)
         if chaos_value is not None:
-            row["chaosValue"] = chaos_value
-            row["chaosEquivalent"] = chaos_value
-            row["valueChaos"] = chaos_value
-            row["value"] = {"chaos": chaos_value}
-            rate: Dict[str, float] = {"chaosPerItem": chaos_value}
-            if primary_value is not None:
-                rate["divine"] = primary_value
-                rate["chaosValue"] = chaos_value
-            row["rate"] = rate
+            row.setdefault("chaosValue", chaos_value)
+            row.setdefault("chaosEquivalent", chaos_value)
+            row.setdefault("valueChaos", chaos_value)
+            value_block = row.get("value")
+            if not isinstance(value_block, dict):
+                value_block = {}
+            value_block.setdefault("chaos", chaos_value)
+            row["value"] = value_block
+            rate_block = row.get("rate")
+            if not isinstance(rate_block, dict):
+                rate_block = {}
+            rate_block.setdefault("chaosPerItem", chaos_value)
+            if chaos_per_primary is not None and row.get("primaryValue") is not None:
+                rate_block.setdefault("chaosValue", chaos_value)
+            row["rate"] = rate_block
 
         rows.append(row)
 
@@ -525,6 +527,30 @@ def _fetch_poe_exchange_snapshot(
         raise ApiError(f"No exchange data returned for category '{category}' in league '{league}'.")
     entries = _parse_currency_lines(rows, divine_rate, icon_lookup, name_lookup)
     entries = _deduplicate_entries(entries)
+    try:
+        stash_snapshot = _fetch_poe_snapshot(league, category, timeout, ninja_cookie)
+    except ApiError:
+        stash_snapshot = None
+    if stash_snapshot and stash_snapshot.entries:
+        stash_lookup: Dict[str, CurrencyEntry] = {}
+        for stash_entry in stash_snapshot.entries:
+            for key in _collect_keys(stash_entry.details_id, stash_entry.name):
+                if key:
+                    stash_lookup.setdefault(key, stash_entry)
+        for entry in entries:
+            if entry.sparkline and entry.trade_count and entry.change_percent is not None:
+                continue
+            for key in _collect_keys(entry.details_id, entry.name):
+                stash_match = stash_lookup.get(key)
+                if not stash_match:
+                    continue
+                if not entry.sparkline and stash_match.sparkline:
+                    entry.sparkline = stash_match.sparkline
+                if entry.trade_count is None and stash_match.trade_count:
+                    entry.trade_count = stash_match.trade_count
+                if entry.change_percent is None and stash_match.change_percent is not None:
+                    entry.change_percent = stash_match.change_percent
+                break
     if divine_rate and divine_rate > 0:
         for entry in entries:
             entry.divine_value = entry.chaos_value / divine_rate if entry.chaos_value else None
@@ -755,7 +781,9 @@ def _apply_exchange_overview_data(
 
     core = exchange_data.get("core") or {}
     chaos_per_primary = _derive_chaos_per_primary(core)
-    divine_rate_from_core = _derive_divine_rate_from_core(core, chaos_per_primary)
+    divine_rate_from_core = _normalize_divine_rate(
+        _derive_divine_rate_from_core(core, chaos_per_primary)
+    )
     if divine_rate_from_core:
         for entry in entries:
             if entry.chaos_value:
@@ -855,7 +883,14 @@ def _apply_exchange_overview_data(
                 continue
             detail = detail_data.get(entry.details_id)
             if detail:
-                _update_entry_from_exchange_detail(entry, detail, icon_lookup, name_lookup, divine_rate_from_core)
+                _update_entry_from_exchange_detail(
+                    entry,
+                    detail,
+                    icon_lookup,
+                    name_lookup,
+                    chaos_per_primary,
+                    divine_rate_from_core,
+                )
 
 
 def _derive_chaos_per_primary(core: dict) -> Optional[float]:
@@ -897,6 +932,13 @@ def _compute_exchange_chaos_value(
 ) -> Optional[float]:
     if not isinstance(line, dict):
         return None
+    existing = (
+        _extract_float(line.get("chaosValue"))
+        or _extract_float(line.get("chaosEquivalent"))
+        or _extract_float(line.get("valueChaos"))
+    )
+    if existing is not None:
+        return existing
     primary_value = _extract_float(line.get("primaryValue"))
     if primary_value is not None and chaos_per_primary:
         return primary_value * chaos_per_primary
@@ -960,15 +1002,18 @@ def _update_entry_from_exchange_detail(
     detail: dict,
     icon_lookup: Dict[str, str],
     name_lookup: Dict[str, str],
+    chaos_per_primary: Optional[float],
     divine_rate: Optional[float],
 ) -> None:
     if not isinstance(detail, dict):
         return
     detail_line = detail.get("line")
     if isinstance(detail_line, dict):
-        chaos_value = _compute_exchange_chaos_value(detail_line, divine_rate)
+        chaos_value = _compute_exchange_chaos_value(detail_line, chaos_per_primary)
         if chaos_value is not None:
             entry.chaos_value = chaos_value
+            if divine_rate:
+                entry.divine_value = chaos_value / divine_rate if chaos_value else None
         trade_count = (
             _extract_trade_count(detail_line)
             or _extract_trade_count(detail_line.get("receive"))
@@ -1410,6 +1455,14 @@ def _parse_currency_lines(
             or _extract_trade_count(line.get("pay"))
             or _extract_trade_count(line)
         )
+        if not trade_count:
+            volume = (
+                _extract_float(line.get("volume"))
+                or _extract_float(line.get("volumeSecondaryValue"))
+                or _extract_float(line.get("volumePrimaryValue"))
+            )
+            if volume:
+                trade_count = int(round(volume))
 
         divine_value = None
         if divine_chaos_value and divine_chaos_value > 0:

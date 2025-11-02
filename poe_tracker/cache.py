@@ -10,6 +10,7 @@ from .data import CurrencyEntry, CurrencySnapshot
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
 CACHE_FILE = CACHE_DIR / "snapshots.json"
 DEFAULT_CACHE_TTL = 3600.0  # one hour
+CACHE_VERSION = 3
 
 
 def _serialize_entry(entry: CurrencyEntry) -> dict:
@@ -92,8 +93,12 @@ class SnapshotCache:
             return
         if not isinstance(payload, dict):
             return
+        version = payload.get("__version__")
+        if version != CACHE_VERSION:
+            return
+        payload_entries = {key: value for key, value in payload.items() if key != "__version__"}
         now = time.time()
-        for key, value in payload.items():
+        for key, value in payload_entries.items():
             if not isinstance(value, dict):
                 continue
             normalized_key = self._normalize_key(key)
@@ -119,6 +124,7 @@ class SnapshotCache:
                 "cached_at": cached_at,
                 "snapshot": _serialize_snapshot(snapshot),
             }
+        payload["__version__"] = CACHE_VERSION
         try:
             with CACHE_FILE.open("w", encoding="utf-8") as handle:
                 json.dump(payload, handle)

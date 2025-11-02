@@ -24,8 +24,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--category",
-        default="Currency",
-        help="Currency overview category (Currency, Fragment, etc.) (default: %(default)s)",
+        default=None,
+        help="Currency overview category (Currency, Fragment, etc.) (default: value saved in tracker_config.json)",
     )
     parser.add_argument(
         "--game",
@@ -61,6 +61,8 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> TrackerConfig:
         settings["game"] = args.game
     if args.league:
         settings["league"] = args.league
+    if args.category:
+        settings["category"] = args.category
     if args.limit is not None:
         if args.limit <= 0:
             parser.error("--limit must be greater than zero")
@@ -74,13 +76,16 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> TrackerConfig:
     league = settings["league"]
     limit = int(settings["limit"])
     interval = float(settings["interval"])
+    category = settings.get("category", "Currency")
+    price_mode = settings.get("price_mode", "stash")
     return TrackerConfig(
         league=league,
-        category=args.category,
+        category=category,
         game=game,
         limit=limit,
         refresh_interval=interval,
         poe_ninja_cookie=args.ninja_cookie,
+        price_mode=price_mode,
         settings=settings,
     )
 
